@@ -1,0 +1,62 @@
+---
+title: "BPH - Exploratory analysis"
+author: "Federico Andreis"
+date: "18 September 2018"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl) # to read in data
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(ggmap)
+library(sf)
+library(INLA)
+library(raster)
+library(leaflet)
+library(maptools)
+library(lme4) # for mixed effects models
+library(gstat)
+library(spacetime) # for spatio-temporal variograms
+library(xts) # time objects
+library(rgdal) # shapefiles
+```
+
+## Data in
+Load the data and create a reduced version of the dataset with outcome grouped by *hydrocloride*
+
+```{r}
+df <- read.csv('Data/df.csv')
+
+dr <- df %>% group_by(gp_code,year,hydrocloride) %>% slice(1) %>% 
+  ungroup %>% dplyr::select(-one_of('drug')) %>% mutate(lhydro_n=log(hydro_n))
+```
+## Let's take an overall look at the data
+Show temporal trends in prescription by hydrocloride.
+
+```{r}
+dr %>% ggplot(aes(x=year,y=lhydro_n,group=hydrocloride,
+                  col=factor(hydrocloride)))+
+  geom_smooth()+theme_bw()
+```
+Show spatial trends faceted by year.
+
+```{r}
+dr %>% ggplot(aes(Longitude, Latitude, size = hydro_n, colour = hydrocloride)) +
+  geom_point(alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~year)
+```
+
+Show the GP positions.
+```{r}
+map_scotland <- readOGR('Data/Scotland boundary.shp')
+plot(map_scotland)
+dr_map <- dr
+coordinates(dr_map) <- ~Easting+Northing
+plot(dr_map,add=TRUE,col='red')
+```
+
+## 
+
