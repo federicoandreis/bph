@@ -41,11 +41,11 @@ dr %>% ggplot(aes(x=year,y=lhydro_n,group=hydrocloride,
                   col=factor(hydrocloride)))+
   geom_smooth()+theme_bw()
 ```
-Show spatial trends faceted by year.
+Show spatial trends faceted by year. [**pretty useless as is**]
 
 ```{r}
-dr %>% ggplot(aes(Longitude, Latitude, size = hydro_n, colour = hydrocloride)) +
-  geom_point(alpha = 0.7, show.legend = FALSE) +
+dr %>% ggplot(aes(Longitude, Latitude, size = lhydro_n, colour = factor(hydrocloride))) +
+  geom_point(alpha = 0.2) +
   facet_wrap(~year)
 ```
 
@@ -59,4 +59,230 @@ plot(dr_map,add=TRUE,col='red')
 ```
 
 ## Models
+We wish to investigate the existence of a spatiotemporal component predictive of inequalities in the number of drug prescriptions. We do so stratifying by hydrocloride group. In order to do so, we begin by fitting two separate simple mixed log-linear models for `hydrocloride==1` and `hydrocloride==1`.
 
+### Separate models for the two groups
+The random effects under consideration are a gp effect and a postcode$\times$year effect [**gp is, de facto, nested within postcode... is this going to cause problems here?**]. We first define a postcode$\times$year label and log-transform the outcome. Also, build two separate dataframes for the two groups, for simplicity.
+```{r}
+dr_mod <- dr %>% mutate(postcode_year=paste(POSTCODE,year),
+                        lhydro_n=log(hydro_n))
+dr1 <- dr_mod %>% filter(hydrocloride==1)
+dr0 <- dr_mod %>% filter(hydrocloride==0)
+```
+Fit the log-linear model for the hydrocloride group with and without the random effects
+```{r}
+mod_hydro1 <- lmer(lhydro_n~(1|gp_code)+(1|postcode_year),
+                   data=dr1,REML = FALSE)
+mod_hydro1_null <- glm(lhydro_n~1,
+                   data=dr1)
+mod_hydro1_gp <- lmer(lhydro_n~1+(1|gp_code),
+                        data=dr1,REML = FALSE)
+mod_hydro1_py <- lmer(lhydro_n~1+(1|postcode_year),
+                        data=dr1,REML = FALSE)
+```
+and cross-compare them
+```{r}
+anova(mod_hydro1,mod_hydro1_null)
+anova(mod_hydro1,mod_hydro1_gp)
+anova(mod_hydro1,mod_hydro1_py)
+```
+Similarly, for the non-hydrocloride group:
+```{r}
+mod_hydro0 <- lmer(lhydro_n~(1|gp_code)+(1|postcode_year),
+                   data=dr0,REML = FALSE)
+mod_hydro0_null <- glm(lhydro_n~1,
+                       data=dr0)
+mod_hydro0_gp <- lmer(lhydro_n~1+(1|gp_code),
+                      data=dr0,REML = FALSE)
+mod_hydro0_py <- lmer(lhydro_n~1+(1|postcode_year),
+                      data=dr0,REML = FALSE)
+anova(mod_hydro0,mod_hydro0_null)
+anova(mod_hydro0,mod_hydro0_gp)
+anova(mod_hydro0,mod_hydro0_py)
+```
+Model summaries for the full models:
+```{r}
+summary(mod_hydro1)
+summary(mod_hydro0)
+```
+
+#### Model diagnostics
+Residuals against time and space
+```{r}
+pairs(cbind(dr1$year,dr1$Latitude,dr1$Longitude,residuals(mod_hydro1)),labels=c('year','latitude','longitude','residuals'),main='hydrocloride')
+pairs(cbind(dr0$year,dr0$Latitude,dr0$Longitude,residuals(mod_hydro0)),labels=c('year','latitude','longitude','residuals'),main='non-hydrocloride')
+```
+
+There seems to be some heteroscedasticity in the residuals against both time and location. Now for the random effects part:
+```{r}
+
+ranef_hydro1 <- ranef(mod_hydro1)
+ranef_hydro0 <- ranef(mod_hydro0)
+
+par(mfrow=c(1,2))
+plot(density(ranef_hydro1$gp_code$`(Intercept)`),main='gp effect',
+     xlim=c(-5,3),ylim=c(0,.8))
+lines(density(ranef_hydro0$gp_code$`(Intercept)`),lty=2)
+legend('topleft',box.lty = 0,bg=NULL,
+       lty=1:2,legend=c('Hydrocloride==1','Hydrocloride==0'))
+
+plot(density(ranef_hydro0$postcode_year$`(Intercept)`),lty=2,
+     main='postcode by year effect',
+     xlim=c(-5,3),ylim=c(0,.8))
+lines(density(ranef_hydro1$postcode_year$`(Intercept)`))
+legend('topleft',box.lty = 0,bg=NULL,
+       lty=1:2,legend=c('Hydrocloride==1','Hydrocloride==0'))
+par(mfrow=c(1,1))
+```
+While the gp effect seems to be substantially the same (overall) across the two groups, the time$\times$space component shows a somewhat different behaviour. This may warrant both joint modelling of the two groups and inclusion of a spatiotemporal component. Next, we explore the spatial and temporal correlation features by means of variograms.
+
+### Variograms
+This part has been inspired by the tutorial on spatio-temporal kriging found [here](http://r-video-tutorial.blogspot.com/2015/08/spatio-temporal-kriging-in-r.html). We use the `spacetime` package to create an object of class `STIDF`, suitable for data over non-regular spatio-temporal grids. We do this initially stratifying by group. As the computations involved are quite heavy, we subsample the complete dataset (500 obs per group). [**the subsampling does not retain any specific structure of the data, i.e., rows of the dataframe are sampled independently. We could improve over this but I'm not sure it would make a huge difference at this stage.**]
+
+#### Hydrocloride group
+Create the `STIDF` object.
+```{r}
+set.seed(42)
+drr_mod <- dr_mod %>% 
+  filter(hydrocloride==1) %>% 
+  sample_n(500)
+
+xy <- SpatialPoints(cbind(drr_mod$Easting,drr_mod$Northing))
+proj4string(xy) <- CRS("+init=epsg:27700")
+z <- as.POSIXct(drr_mod$time,tz = 'GMT')
+
+st <- STIDF(xy,time=z,data.frame(y=drr_mod$lhydro_n))
+```
+Construct the empirical variogram
+```{r}
+st_variogram <- variogramST(y~1,data=st,tunit='weeks',
+                            tlags=52*0:15,
+                            assumeRegular=FALSE,na.omit=T) 
+
+par(mfrow=c(1,2))
+plot(st_variogram,map=FALSE)
+plot(st_variogram,wireframe=TRUE)
+par(mfrow=c(1,1))
+```
+Fit variogram models
+```{r}
+pars.l <- c(sill.s = 0, range.s = 10, nugget.s = 0,sill.t = 0, 
+            range.t = 1, nugget.t = 0,sill.st = 0, range.st = 10, 
+            nugget.st = 0, anis = 0)
+pars.u <- c(sill.s = 200, range.s = 1000, nugget.s = 6,sill.t = 200, 
+            range.t = 60, nugget.t = 6,sill.st = 200, range.st = 1000, 
+            nugget.st = 6,anis = 700) 
+# separable
+separable <- vgmST("separable", 
+                   space = vgm(-60,"Sph", 500, 1),
+                   time = vgm(35,"Sph", 500, 1), sill=0.56) 
+separable_Vgm <- fit.StVariogram(st_variogram, separable, fit.method=11,
+                                      method="L-BFGS-B", stAni=5, 
+                                      lower=pars.l,upper=pars.u)
+attr(separable_Vgm, "MSE")
+# product sum
+prodSumModel <- vgmST("productSum",space = vgm(1, "Exp", 150, 0.5),
+                      time = vgm(1, "Exp", 5, 0.5),k = 50) 
+prodSumModel_Vgm <- fit.StVariogram(st_variogram, prodSumModel,
+                                    method = "L-BFGS-B",lower=pars.l)
+# metric
+metric <- vgmST("metric", joint = vgm(50,"Mat", 500, 0), stAni=200) 
+metric_Vgm <- fit.StVariogram(st_variogram, metric, 
+                              method="L-BFGS-B",lower=pars.l)
+# sum metric
+sumMetric <- vgmST("sumMetric", space = vgm(psill=5,"Sph", range=500, nugget=0),
+                   time = vgm(psill=500,"Sph", range=500, nugget=0), 
+                   joint = vgm(psill=1,"Sph", range=500, nugget=10), stAni=500) 
+sumMetric_Vgm <- fit.StVariogram(st_variogram, sumMetric, 
+                                 method="L-BFGS-B",lower=pars.l,upper=pars.u,
+                                 tunit="weeks")
+# simple sum metric
+SimplesumMetric <- vgmST("simpleSumMetric",space = vgm(5,"Sph", 500, 0),
+                         time = vgm(500,"Sph", 500, 0), 
+                         joint = vgm(1,"Sph", 500, 0), nugget=1, stAni=500) 
+SimplesumMetric_Vgm <- fit.StVariogram(st_variogram, SimplesumMetric,
+                                       method = "L-BFGS-B",lower=pars.l)
+```
+And now plot them all together, while providing a measure of goodness of fit (MSE).
+```{r}
+plot(st_variogram,
+     list(separable_Vgm, prodSumModel_Vgm, 
+          metric_Vgm, sumMetric_Vgm, 
+          SimplesumMetric_Vgm),all=T,wireframe=T,
+     main='hydrocloride')
+c(attr(separable_Vgm,'MSE'),
+  attr(prodSumModel_Vgm,'MSE'),
+  attr(metric_Vgm,'MSE'),
+  attr(sumMetric_Vgm,'MSE'),
+  attr(SimplesumMetric_Vgm,'MSE'))
+```
+#### Non-hydrocloride group
+```{r, echo=FALSE}
+set.seed(42)
+drr_mod <- dr_mod %>% 
+  filter(hydrocloride==0) %>% 
+  sample_n(500)
+
+xy <- SpatialPoints(cbind(drr_mod$Easting,drr_mod$Northing))
+proj4string(xy) <- CRS("+init=epsg:27700")
+z <- as.POSIXct(drr_mod$time,tz = 'GMT')
+
+st <- STIDF(xy,time=z,data.frame(y=drr_mod$lhydro_n))
+
+st_variogram <- variogramST(y~1,data=st,tunit='weeks',
+                            tlags=52*0:15,
+                            assumeRegular=FALSE,na.omit=T) 
+
+par(mfrow=c(1,2))
+plot(st_variogram,map=FALSE)
+plot(st_variogram,wireframe=TRUE)
+par(mfrow=c(1,1))
+
+pars.l <- c(sill.s = 0, range.s = 10, nugget.s = 0,sill.t = 0, 
+            range.t = 1, nugget.t = 0,sill.st = 0, range.st = 10, 
+            nugget.st = 0, anis = 0)
+pars.u <- c(sill.s = 200, range.s = 1000, nugget.s = 6,sill.t = 200, 
+            range.t = 60, nugget.t = 6,sill.st = 200, range.st = 1000, 
+            nugget.st = 6,anis = 700) 
+# separable
+separable <- vgmST("separable", 
+                   space = vgm(-60,"Sph", 500, 1),
+                   time = vgm(35,"Sph", 500, 1), sill=0.56) 
+separable_Vgm <- fit.StVariogram(st_variogram, separable, fit.method=11,
+                                      method="L-BFGS-B", stAni=5, 
+                                      lower=pars.l,upper=pars.u)
+attr(separable_Vgm, "MSE")
+# product sum
+prodSumModel <- vgmST("productSum",space = vgm(1, "Exp", 150, 0.5),
+                      time = vgm(1, "Exp", 5, 0.5),k = 50) 
+prodSumModel_Vgm <- fit.StVariogram(st_variogram, prodSumModel,
+                                    method = "L-BFGS-B",lower=pars.l)
+# metric
+metric <- vgmST("metric", joint = vgm(50,"Mat", 500, 0), stAni=200) 
+metric_Vgm <- fit.StVariogram(st_variogram, metric, 
+                              method="L-BFGS-B",lower=pars.l)
+# sum metric
+sumMetric <- vgmST("sumMetric", space = vgm(psill=5,"Sph", range=500, nugget=0),
+                   time = vgm(psill=500,"Sph", range=500, nugget=0), 
+                   joint = vgm(psill=1,"Sph", range=500, nugget=10), stAni=500) 
+sumMetric_Vgm <- fit.StVariogram(st_variogram, sumMetric, 
+                                 method="L-BFGS-B",lower=pars.l,upper=pars.u,
+                                 tunit="weeks")
+# simple sum metric
+SimplesumMetric <- vgmST("simpleSumMetric",space = vgm(5,"Sph", 500, 0),
+                         time = vgm(500,"Sph", 500, 0), 
+                         joint = vgm(1,"Sph", 500, 0), nugget=1, stAni=500) 
+SimplesumMetric_Vgm <- fit.StVariogram(st_variogram, SimplesumMetric,
+                                       method = "L-BFGS-B",lower=pars.l)
+
+plot(st_variogram,
+     list(separable_Vgm, prodSumModel_Vgm, 
+          metric_Vgm, sumMetric_Vgm, 
+          SimplesumMetric_Vgm),all=T,wireframe=T,
+     main='non-hydrocloride')
+c(attr(separable_Vgm,'MSE'),
+  attr(prodSumModel_Vgm,'MSE'),
+  attr(metric_Vgm,'MSE'),
+  attr(sumMetric_Vgm,'MSE'),
+  attr(SimplesumMetric_Vgm,'MSE'))
+```

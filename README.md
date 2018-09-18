@@ -21,3 +21,6 @@ df.csv contains the relevant variables.
 - SIMD16_x, x=\{Rank, Vigintile, Decile, Quintile\} [covariate, Scottish Index of Multiple Deprivation]
 - hydrochloride=\{0, 1\} [hydrocloride drugs yes/no]
 - hydro_n [sum of n_items grouped by hydrochloride]
+
+### Exploratory analysis
+Some exploratory analyses of the data can be found [here](https://github.com/federicoandreis/bph/blob/master/main.md).
